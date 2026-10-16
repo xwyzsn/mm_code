@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.pytest_cache/
+lightning_logs/
+.DS_Store
+.claude/settings.local.json
