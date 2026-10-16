@@ -44,11 +44,8 @@ class ModelConfig:
     event_vec_dim: int = 32  # D of each pre-extracted semantic vector
     n_event_labels: int = 16
 
-    # Time patch tokenizer and FiLM
-    n_patch_tokens: int = 4  # P
-    slice_len: int = 32  # samples per [pre, event, post] history slice
+    # History response features and dynamic head
     ma_window: int = 24
-    recent_len: int = 48
     period: int = 24  # intraday period for sin/cos encoding
     alpha_max: float = 2.5
 

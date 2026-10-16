@@ -44,7 +44,7 @@ TimesFM calls its linears with flattened inputs: `seq_attn` (b·v, n, d), `var_a
 **Decision:** key = (series_id, SHA-1 of the Qwen input tensors and H). The value is the detached (C_event, P_step). The cache is used only when it is turned on (inference or frozen-feature training). With trainable LoRA, cached values become stale. The schema gets an optional `series_id`.
 
 ### H11 — open — Spread start value of the dynamic head
-s̃ = H_top · U · V has no bias, so s_spread starts at Softplus(≈0) + 0.1 = 0.79, and the event quantile range becomes narrower before training. Options: keep it as specified, or add a bias so that s_spread = 1.0 at the start (as in Scheme 1, S7).
+s̃ = H_top · U · V has no bias, so s_spread starts near Softplus(0) + 0.1 = 0.79, and the event quantile range becomes narrower before training. **Stage B decision:** kept as specified (no bias), because there was no answer yet. The alternative is a bias so that s_spread = 1.0 at the start (as in Scheme 1, S7).
 
 ### H12 — open — Test 5 with 50 steps
 In Scheme 1, 50 steps were not enough for a reliable elasticity separation (C1). I will measure this again for Scheme 2 and record the result here.
@@ -60,6 +60,18 @@ As in Scheme 1 (S1): the mock TimesFM is trainable, except W0 and b0 inside the 
 
 ### H16 — info — Test 2 runs in float64
 The batched-equivalence test runs in float64, so it checks the algebra (error < 1e-6) without float32 summation-order noise. It checks the `task.md` form (m_act = 1, Δm = 0) and the full form (per-token m_act and Δm).
+
+### H17 — open — HeadHyperMLP initialization
+`task.md` gives no init for the head. If both U_head and V_head start near 0, the bilinear output H_top · U · V has almost no gradient at step 1. **Decision:** last-layer weights N(0, 1e-3); the U part of the bias N(0, 1/d_ts) and the V part N(0, 1e-2). Then U is a random projection, V is small, the head output starts near 0, and all head parameters get a gradient at step 1.
+
+### H18 — info — Cache hit vs. no cache
+A cache hit equals the cache miss exactly (test 4). Compared with a run without a cache, the difference is ≤ 2e-6, because the cached tensors are contiguous copies of strided views and BLAS can use a different summation order. The test checks this with `allclose(atol=1e-5)`.
+
+### H19 — open — Hypernetwork regularizer
+**Decision:** `hyper_reg` = mean over samples of Σ over the 40 HyperDoRA layers of (‖s(E)‖² + ‖Δm(E)‖²). `task.md` does not say whether this is a sum or a mean over the layers. The weight λ_reg comes in Stage C.
+
+### H20 — info — Cache misses return cached values too
+On a miss, the whole batch is encoded, stored (detached), and then read from the cache. So a miss and a hit give the same tensors, and no gradient flows into Qwen when a cache is used.
 
 ## Stage 3 (losses, demo, tests)
 

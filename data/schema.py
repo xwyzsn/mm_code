@@ -1,6 +1,6 @@
 """Tensor contract for multimodal time-series + event batches. All offsets are relative to the forecast start t0 = 0."""
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 from torch import Tensor
 
@@ -26,3 +26,4 @@ class MultimodalTSBatch:
     events: EventBatch
     future_y: Optional[Tensor] = None  # [B, H], training only
     future_mask: Optional[Tensor] = None  # [B, H] bool
+    series_id: Optional[Sequence[str]] = None  # [B], key of EventContextCache

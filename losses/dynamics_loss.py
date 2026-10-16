@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from configs.model_config import ModelConfig
-from models.llava_ts_model import LlavaTSOutput
+from models.hyper_timesfm_model import HyperTSOutput
 
 
 def robust_pinball(pred: Tensor, target: Tensor, q: Tensor, delta: float) -> Tensor:
@@ -31,7 +31,7 @@ def _masked_mean(x: Tensor, mask: Tensor) -> Tensor:
 
 
 def dynamics_loss(
-    out: LlavaTSOutput, future_y: Tensor, future_mask: Tensor, quantiles: Sequence[float], cfg: ModelConfig
+    out: HyperTSOutput, future_y: Tensor, future_mask: Tensor, quantiles: Sequence[float], cfg: ModelConfig
 ) -> Dict[str, Tensor]:
     q = torch.tensor(quantiles, device=future_y.device, dtype=future_y.dtype)
     mu, sigma, k = out.mu, out.sigma, out.median_idx

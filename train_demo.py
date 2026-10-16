@@ -1,7 +1,7 @@
-"""Minimal LLaVA-TS training loop (Lightning) on synthetic impulse data, plus an in-context elasticity report.
+"""Minimal HyperLoRA training loop (Lightning) on synthetic impulse data, plus an elasticity report.
 
 All events have the same text. High (3.5x) and low (1.0x) elasticity series differ only in their history response,
-so the model can tell them apart only through the interleaved <TS_HIST_PATCH> tokens.
+so the hypernetwork can tell them apart only through the history response features.
 Run: .venv/bin/python train_demo.py --steps 50
 """
 import argparse
@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from configs.model_config import ModelConfig
 from data.synthetic_generator import make_elasticity_batch
 from losses.dynamics_loss import dynamics_loss
-from models.llava_ts_model import LlavaTSModel
+from models.hyper_timesfm_model import HyperTimesFMModel
 
 EVAL_SEED = 10_000  # held-out batch, never used for training
 
@@ -33,11 +33,11 @@ class SyntheticStream(IterableDataset):
             step += 1
 
 
-class LlavaTSLightning(L.LightningModule):
+class HyperTSLightning(L.LightningModule):
     def __init__(self, cfg: ModelConfig, lr: float):
         super().__init__()
         self.cfg, self.lr = cfg, lr
-        self.model = LlavaTSModel(cfg)
+        self.model = HyperTimesFMModel(cfg)
 
     def training_step(self, batch, batch_idx):
         out = self.model(batch)
@@ -50,7 +50,7 @@ class LlavaTSLightning(L.LightningModule):
 
 
 @torch.no_grad()
-def elasticity_report(model: LlavaTSModel, cfg: ModelConfig, batch_size: int = 64) -> Dict[str, float]:
+def elasticity_report(model: HyperTimesFMModel, cfg: ModelConfig, batch_size: int = 64) -> Dict[str, float]:
     """Metrics on the held-out batch. hi = 3.5x series, lo = 1.0x series; the future event is the last event."""
     was_training = model.training
     model.eval()
@@ -86,10 +86,10 @@ def train(
     lr: float = 4e-3,
     seed: int = 0,
     accelerator: str = "auto",
-) -> Tuple[LlavaTSModel, Dict[str, float], Dict[str, float]]:
+) -> Tuple[HyperTimesFMModel, Dict[str, float], Dict[str, float]]:
     L.seed_everything(seed, verbose=False)
     cfg = cfg or ModelConfig()
-    module = LlavaTSLightning(cfg, lr)
+    module = HyperTSLightning(cfg, lr)
     before = elasticity_report(module.model, cfg)
     trainer = L.Trainer(
         max_steps=steps,

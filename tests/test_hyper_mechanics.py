@@ -8,12 +8,41 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from backbones.qwen_hyper_backbone import EventContextCache  # noqa: E402
 from backbones.timesfm_modular import ModularTimesFM3Backbone  # noqa: E402
 from configs.model_config import ModelConfig  # noqa: E402
 from data.synthetic_generator import make_elasticity_batch  # noqa: E402
+from losses.dynamics_loss import dynamics_loss  # noqa: E402
 from models.hyper_dora_linear import HyperCondition, HyperDoRALinear, hyper_condition  # noqa: E402
+from models.hyper_timesfm_model import HyperTimesFMModel  # noqa: E402
 
 TIMESFM_SNAPSHOTS = Path.home() / ".cache/huggingface/hub/models--google--timesfm-3.0-pytorch/snapshots"
+
+
+@pytest.fixture(scope="module")
+def cfg():
+    return ModelConfig()
+
+
+def new_model(cfg):
+    torch.manual_seed(0)
+    return HyperTimesFMModel(cfg)
+
+
+def has_grad(p):
+    return p.grad is not None and not p.grad.isnan().any() and p.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize("horizon", [12, 24, 96])
+def test_zero_event_strict_weight_identity(cfg, horizon):
+    model = new_model(cfg)
+    batch, _ = make_elasticity_batch(4, horizon=horizon)
+    batch.events.event_mask[:, -1] = False  # remove the only future event; history events stay
+    out = model(batch)
+    native = model.timesfm(batch.history_x, batch.history_mask, horizon, cfg.quantiles)  # no HyperDoRA condition
+    assert out.quantiles.shape == (4, horizon, len(cfg.quantiles))
+    assert out.envelope.max().item() == 0.0
+    assert (out.quantiles - native.base_quantiles).abs().max().item() == 0.0
 
 
 def per_token_condition(c_event, m_tokens):
@@ -95,3 +124,43 @@ def test_prod_timesfm_zero_event_identity_and_gradient():
         for p in (layer.A, layer.B, layer.proj.weight):
             assert p.grad is not None and p.grad.abs().sum() > 0 and not p.grad.isnan().any()
         assert layer.base.weight.grad is None
+
+
+def test_hypernetwork_gradient_flow(cfg):
+    model = new_model(cfg)
+    batch, _ = make_elasticity_batch(8)
+    out = model(batch)
+    (dynamics_loss(out, batch.future_y, batch.future_mask, cfg.quantiles, cfg)["total"] + out.hyper_reg).backward()
+
+    lora_b = [p for n, p in model.qwen.named_parameters() if "lora_B" in n]  # lora_A is 0 at step 1 (B = 0)
+    assert lora_b and all(has_grad(p) for p in lora_b)
+    assert len(model.timesfm.hyper_layers) == 40
+    for layer in model.timesfm.hyper_layers:
+        assert all(has_grad(p) for p in (layer.A, layer.B, layer.proj.weight, layer.proj.bias))
+    assert all(has_grad(p) for p in model.head.parameters())
+
+
+def test_context_cache_and_quantile_monotonicity(cfg, monkeypatch):
+    model = new_model(cfg)
+    batch, _ = make_elasticity_batch(6)
+    batch.series_id = [f"series-{b}" for b in range(6)]
+    calls = []
+    encode = model.qwen.encode
+    monkeypatch.setattr(model.qwen, "encode", lambda *a: calls.append(1) or encode(*a))
+    cache = EventContextCache()
+    with torch.no_grad():
+        miss, hit, no_cache = model(batch, cache=cache), model(batch, cache=cache), model(batch)
+    assert len(calls) == 2  # miss + no-cache run; the hit does not run Qwen
+    assert (hit.quantiles - miss.quantiles).abs().max().item() == 0.0
+    # Cached values are contiguous copies of strided views: only float summation order can differ.
+    assert torch.allclose(hit.quantiles, no_cache.quantiles, atol=1e-5)
+
+    # Large hypernetwork weights: strong positive and negative impulses must not cross quantiles.
+    with torch.no_grad():
+        nn.init.normal_(model.head.hyper[-1].weight, std=0.5)
+        for layer in model.timesfm.hyper_layers:
+            nn.init.normal_(layer.proj.weight, std=0.5)
+        out = model(batch)
+    u = out.u_median[out.envelope > 0]
+    assert (u > 1.0).any() and (u < -1.0).any()
+    assert (out.quantiles.diff(dim=-1) > 0).all()

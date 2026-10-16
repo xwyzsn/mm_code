@@ -79,3 +79,22 @@
   - prod TimesFM 3.0 zero-event identity and gradients (skipped if the checkpoint is not local).
 - `check.md`: Scheme 2 items H1–H16 (H1, H2 confirmed).
 - Result: `pytest` 11 passed (3 new + 8 Scheme 1). On the real checkpoint: 40 modules replaced, exact identity at m = 0, non-zero gradients for A, B and the projector of all 40 modules, no gradient for W0.
+
+## 2026-10-17 — Scheme 2 (HyperLoRA), Stage B of 3: Qwen hypernetwork, dynamic quantile head, end-to-end model
+
+**Problem:** Stage A had the dynamic TimesFM layers, but no hypernetwork that generates C_event and P_step(t), no dynamic quantile head, and no end-to-end model. The Scheme 1 files were still on the branch.
+
+**Solution:**
+- `backbones/qwen_backbone.py` → `backbones/qwen_hyper_backbone.py` (git mv). Added:
+  - event selection and a 5-phase `event_lifecycle` (H9),
+  - `response_features` (dip depth, peak ratio, integrated gain, recovery slope; H8),
+  - `EventProjector`,
+  - `EventContextCache` (key = (series_id, SHA-1 of the sample inputs and H); H10, H20),
+  - `QwenHyperBackbone`. Its context is [stat, (event semantics, response) pairs, future events, `<EVENT_SUMMARY>`, H step queries], and it returns C_event and P_step (H7).
+- `models/dynamic_quantile_head.py`: `DynamicQuantileHead`. `HeadHyperMLP` generates U_head [B, H, d_ts, r_h] and V_head [B, H, r_h, 3], then the non-crossing quantile composition is applied, with `torch.where(m > 0, ·, base)` for the exact identity (H11, H17).
+- `models/hyper_timesfm_model.py`: `HyperTimesFMModel` (Qwen hypernetwork → HyperDoRA TimesFM → dynamic head) and `HyperTSOutput` with `hyper_reg` (H19).
+- `data/schema.py`: optional `series_id`.
+- Removed the Scheme 1 files: `backbones/timesfm_backbone.py`, `models/{llava_ts_model, interleaved_context, time_patch_tokenizer, distributional_film}.py`, `tests/test_model_mechanics.py`, and the unused config fields `n_patch_tokens`, `slice_len`, `recent_len`.
+- `losses/dynamics_loss.py` and `train_demo.py`: import the new model (the field names are the same). Stage C reworks both files.
+- `tests/test_hyper_mechanics.py`: added test 1 (`test_zero_event_strict_weight_identity`, H = 12/24/96), test 3 (`test_hypernetwork_gradient_flow`) and test 4 (`test_context_cache_and_quantile_monotonicity`).
+- Result: `pytest` 8 passed in 5.5 s (including the prod TimesFM 3.0 test). The MPS forward + backward takes 0.07 s for a batch of 32.
