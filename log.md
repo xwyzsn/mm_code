@@ -23,3 +23,16 @@
 - `ModelConfig.timesfm_model_id` = `google/timesfm-3.0-pytorch`.
 - Check on the local checkpoint (CPU): d_ts = 1280, patch 32, H = 24/96/130 and Q = 1/3/5 levels work, no NaN, monotone. The quantiles are equal to `TimesFM3Forecaster.predict()` (max abs difference 0.0).
 - Started a Git repository and committed Stage 1.
+
+## 2026-10-16 — Stage 2 of 3: model layers (`models/`)
+
+**Problem:** The project needs the LLaVA-TS model layers: time-series soft tokens, the interleaved context with H query tokens, the quantile FiLM layer, and the end-to-end model.
+
+**Solution:**
+- `models/time_patch_tokenizer.py`: trailing masked moving average, jump features R(t) and U(t), `TimeToLLMProjector` (conv kernels 3/5/9 + adaptive pooling + 2-layer MLP). Each history event slice `[start - pre, end + post)` (32 samples: R, U, TimesFM shallow states, phase one-hot, valid flag) gives P = 4 `<TS_HIST_PATCH>` tokens. The recent window gives P = 4 `<TS_RECENT_PATCH>` tokens. One series-statistics token.
+- `models/interleaved_context.py`: `select_events` (publish_offset < 0 only; E_hist = start in [-L, 0), most recent N_hist; E_fut = extended lifetime meets [0, H), earliest N_fut; both in time order). `EventProjector` (time token + label token + Qwen text-token embeddings + multi-vector tokens). `HorizonQueries` (learnable base + step and intraday sin/cos + per-event lifecycle encoding, any H). `InterleavedContextBuilder` gives `inputs_embeds` and the attention mask. Padded and unpublished events are masked tokens.
+- `models/distributional_film.py`: `event_lifecycle` (envelope m(t) and phases warm-up / burst / decay / overdraft). `DistributionalFiLM`: cross-modal attention (separate W_Q, W_K, W_V), heads u, beta, s with N(0, 1e-3) weights. The s bias is set so that s_spread = 1.0 at init. Where m = 0, the output is the base tensor itself (`torch.where`), so the identity is exact with no float rounding.
+- `models/llava_ts_model.py`: `LlavaTSModel` (TimesFM → event selection → tokenizer → context → one Qwen prefill → FiLM) with any H and Q.
+- `configs/model_config.py`: added `slice_len = 32`.
+- `backbones/timesfm_backbone.py`: compute `ndtri` on CPU, because the op has no MPS kernel.
+- Smoke check (CPU and MPS): H = 12/24/72/96 shapes, non-crossing, no NaN; zero events give max |y - base| = 0.0; an unpublished event gives max diff 0.0; gradients are non-zero for LoRA B, tokenizer, Q_hor base and all FiLM parameters; `sem_vecs` without text works.

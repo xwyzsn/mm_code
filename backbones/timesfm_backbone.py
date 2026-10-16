@@ -65,7 +65,7 @@ class MockTimesFM3Backbone(nn.Module):
         steps = torch.arange(horizon, device=x.device, dtype=x.dtype)
         fut = top[:, -1:] + self.horizon_mlp(sinusoidal(steps, d))
         med, spread = self.quantile_head(fut).unbind(-1)
-        z = torch.special.ndtri(torch.tensor(quantiles, device=x.device, dtype=x.dtype))
+        z = torch.special.ndtri(torch.tensor(quantiles)).to(x)  # ndtri has no MPS kernel
         base = mu[..., None] + sigma[..., None] * (med[..., None] + z * F.softplus(spread)[..., None])
         return TimesFMOutput(shallow.repeat_interleave(p, 1)[:, pad:], fut, base)
 

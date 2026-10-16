@@ -41,6 +41,7 @@ class ModelConfig:
 
     # Time patch tokenizer and FiLM
     n_patch_tokens: int = 4  # P
+    slice_len: int = 32  # samples per [pre, event, post] history slice
     ma_window: int = 24
     recent_len: int = 48
     period: int = 24  # intraday period for sin/cos encoding
