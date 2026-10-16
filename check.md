@@ -46,8 +46,8 @@ TimesFM calls its linears with flattened inputs: `seq_attn` (b·v, n, d), `var_a
 ### H11 — open — Spread start value of the dynamic head
 s̃ = H_top · U · V has no bias, so s_spread starts near Softplus(0) + 0.1 = 0.79, and the event quantile range becomes narrower before training. **Stage B decision:** kept as specified (no bias), because there was no answer yet. The alternative is a bias so that s_spread = 1.0 at the start (as in Scheme 1, S7).
 
-### H12 — open — Test 5 with 50 steps
-In Scheme 1, 50 steps were not enough for a reliable elasticity separation (C1). I will measure this again for Scheme 2 and record the result here.
+### H12 — resolved — Test 5 with 50 steps
+Scheme 2 passes test 5 with the 50 steps of `task.md` (lr 1e-3, seeds 0–3 all pass). No extra steps are needed, unlike Scheme 1 (C1).
 
 ### H13 — open — The row norm m0 is not stored
 `task.md` lists the frozen row norm m0 = ‖W0‖_row. The formula y = (1 + m_act · tanh(Δm)) · y0 + m_act · Δy uses only a relative gain, so m0 is never needed. **Decision:** m0 is not stored. Tell me if you want the DoRA form m0 · (1 + tanh Δm) · W / ‖W‖ instead. That form changes the output even when Δm = 0, if B · Diag(s) · A ≠ 0.
@@ -72,6 +72,22 @@ A cache hit equals the cache miss exactly (test 4). Compared with a run without 
 
 ### H20 — info — Cache misses return cached values too
 On a miss, the whole batch is encoded, stored (detached), and then read from the cache. So a miss and a hit give the same tensors, and no gradient flows into Qwen when a cache is used.
+
+### H21 — open — Learning rate 1e-3
+Measured at 50 steps (batch 32): lr 1e-3 passes every test-5 check on seeds 0–3. lr 2e-3 fails on seed 3 (warm-up shift +0.19). lr 3e-3 loses the elasticity separation (u ≈ 0.05), and lr 8e-3 diverges (loss × 5–8). The hypernetwork path is sensitive to the learning rate. A warm-up schedule or per-group learning rates may be needed for prod.
+
+### H22 — open — Synthetic pulse shape
+`task.md` names the stages (warm-up dip, onset spike, exponential decay, post-event overdraft) but gives no shape. **Decision:** factor = 1 − 0.15·A·ramp (pre-buffer) + A·exp(−(t − start) / (duration / 3)) in the event − 0.1·A·exp(−(t − end) / 1.5) in the post-buffer, with A ∈ {3.5, 1.0}.
+
+### H23 — open — Test 5 pass conditions
+On the held-out batch after 50 steps (seed 0):
+- loss < 0.5 × loss before,
+- u_event_hi > 1.5 · u_event_lo > 0,
+- warm-up shift < 0,
+- overdraft shift < 0,
+- width ratio > 1.0.
+
+Seeds 0–3 give u_hi / u_lo = 1.86–2.35 and loss ratios 0.29–0.37.
 
 ## Stage 3 (losses, demo, tests)
 

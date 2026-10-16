@@ -63,6 +63,7 @@ def elasticity_report(model: HyperTimesFMModel, cfg: ModelConfig, batch_size: in
     s, e = batch.events.start_offset[:, -1:], batch.events.end_offset[:, -1:]
     t = torch.arange(cfg.horizon, device=s.device)
     in_event, warmup = (t >= s) & (t < e), (t >= s - cfg.pre_buffer) & (t < s)
+    overdraft = (t >= e) & (t < e + cfg.post_buffer)
     hi, lo = (amp == amp.max()).to(s.device), (amp == amp.min()).to(s.device)
     y, base = out.quantiles, out.base_quantiles
     shift = (y[..., k] - base[..., k]) / out.sigma  # median shift in sigma units
@@ -74,6 +75,7 @@ def elasticity_report(model: HyperTimesFMModel, cfg: ModelConfig, batch_size: in
         "u_event_hi": out.u_median[hi][in_event[hi]].mean().item(),
         "u_event_lo": out.u_median[lo][in_event[lo]].mean().item(),
         "warmup_shift_hi": shift[hi][warmup[hi]].mean().item(),
+        "overdraft_shift_hi": shift[hi][overdraft[hi]].mean().item(),
         "width_ratio_event_hi": width_ratio[hi][in_event[hi]].mean().item(),
         "event_mae_ratio_hi": (abs_err[hi][in_event[hi]].mean() / base_abs_err[hi][in_event[hi]].mean()).item(),
     }
@@ -83,7 +85,7 @@ def train(
     cfg: Optional[ModelConfig] = None,
     steps: int = 50,
     batch_size: int = 32,
-    lr: float = 4e-3,
+    lr: float = 1e-3,
     seed: int = 0,
     accelerator: str = "auto",
 ) -> Tuple[HyperTimesFMModel, Dict[str, float], Dict[str, float]]:

@@ -50,8 +50,10 @@ class ModelConfig:
     alpha_max: float = 2.5
 
     # Loss weights
-    lambda_dyn: float = 0.5
-    lambda_cf: float = 0.5
+    lambda_diff1: float = 0.5  # lambda_1
+    lambda_diff2: float = 0.5  # lambda_2
+    lambda_cf: float = 0.5  # lambda_3
+    lambda_reg: float = 1e-3
     huber_sigma: float = 15.0
 
     def __post_init__(self):

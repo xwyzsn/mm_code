@@ -15,6 +15,7 @@ from data.synthetic_generator import make_elasticity_batch  # noqa: E402
 from losses.dynamics_loss import dynamics_loss  # noqa: E402
 from models.hyper_dora_linear import HyperCondition, HyperDoRALinear, hyper_condition  # noqa: E402
 from models.hyper_timesfm_model import HyperTimesFMModel  # noqa: E402
+from train_demo import train  # noqa: E402
 
 TIMESFM_SNAPSHOTS = Path.home() / ".cache/huggingface/hub/models--google--timesfm-3.0-pytorch/snapshots"
 
@@ -164,3 +165,13 @@ def test_context_cache_and_quantile_monotonicity(cfg, monkeypatch):
     u = out.u_median[out.envelope > 0]
     assert (u > 1.0).any() and (u < -1.0).any()
     assert (out.quantiles.diff(dim=-1) > 0).all()
+
+
+def test_dynamic_operator_impulse_learning():
+    """50 steps (task.md). Same event text; the 3.5x and 1.0x series must get clearly different impulses."""
+    _, before, after = train(steps=50, seed=0, accelerator="cpu")
+    assert after["loss"] < 0.5 * before["loss"]
+    assert after["u_event_hi"] > 1.5 * after["u_event_lo"] > 0  # larger lift for the high-elasticity history
+    assert after["warmup_shift_hi"] < 0  # warm-up dip below the base median
+    assert after["overdraft_shift_hi"] < 0  # post-event overdraft below the base median
+    assert after["width_ratio_event_hi"] > 1.0  # wider quantile range in the event

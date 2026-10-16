@@ -98,3 +98,17 @@
 - `losses/dynamics_loss.py` and `train_demo.py`: import the new model (the field names are the same). Stage C reworks both files.
 - `tests/test_hyper_mechanics.py`: added test 1 (`test_zero_event_strict_weight_identity`, H = 12/24/96), test 3 (`test_hypernetwork_gradient_flow`) and test 4 (`test_context_cache_and_quantile_monotonicity`).
 - Result: `pytest` 8 passed in 5.5 s (including the prod TimesFM 3.0 test). The MPS forward + backward takes 0.07 s for a batch of 32.
+
+## 2026-10-17 — Scheme 2 (HyperLoRA), Stage C of 3: loss terms, multi-stage pulses, demo, test 5, model.md
+
+**Problem:** The Scheme 2 loss had no separate weights for the first and second differences and no hypernetwork regularizer. The generator had no exponential decay or post-event overdraft. Test 5 was missing. With lr 4e-3 the 50-step demo did not learn the warm-up dip or the elasticity difference. `model.md` still described Scheme 1.
+
+**Solution:**
+- `configs/model_config.py`: `lambda_dyn` → `lambda_diff1`, `lambda_diff2` (0.5 each), `lambda_cf` = 0.5, and the new `lambda_reg` = 1e-3.
+- `losses/dynamics_loss.py`: total = L_pinball + λ1 L_diff1 + λ2 L_diff2 + λ3 L_cf + λ_reg · `hyper_reg`. The keys are now `diff1`, `diff2` and `reg`.
+- `data/synthetic_generator.py`: pulse = warm-up ramp dip + onset spike with exponential decay + post-event overdraft (`check.md` H22). It adds `post_buffer` and `series_id`.
+- `train_demo.py`: lr 4e-3 → 1e-3 (H21). The report adds `overdraft_shift_hi`.
+- `tests/test_hyper_mechanics.py`: `test_dynamic_operator_impulse_learning` (50 steps; H23).
+- `model.md`: rewritten for Scheme 2. It has the original design, the current implementation, Changes D1–D6, Interpretations I1–I20, Additions A1–A5, and the verification limits. The Scheme 1 version stays on `main`.
+- `check.md`: H12 resolved; H21–H23 added.
+- Result: `pytest` 9 passed in 16 s. 50 steps, lr 1e-3, seeds 0–3: loss × 0.29–0.37, u_hi / u_lo 1.86–2.35, warm-up shift −0.27 to −0.41σ, overdraft shift −0.12 to −0.28σ, width ratio 1.24–1.39. MPS run: loss 1.34 → 0.38.

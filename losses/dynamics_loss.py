@@ -1,9 +1,10 @@
 """Generic dynamics loss in the linear normalized space Y~ = (Y - mu_X) / sigma_X (no arcsinh).
 
-L_total = L_quantile + lambda_1 L_dynamics + lambda_2 L_cf
-L_quantile: pinball over all quantiles, linear for |e| <= 15 (sigma units), log growth above (soft transition).
-L_dynamics: pinball on first differences (all quantiles) + Smooth-L1 on the median second difference.
-L_cf:       Smooth-L1 between u_0.5 and the clipped true log ratio u*, where m(t) > 0.
+L_total = L_pinball + lambda_1 L_diff1 + lambda_2 L_diff2 + lambda_3 L_cf + lambda_reg (||s(E)||^2 + ||dm(E)||^2)
+L_pinball: pinball over all quantiles, linear for |e| <= 15 (sigma units), log growth above (soft transition).
+L_diff1:   pinball on first differences (all quantiles).
+L_diff2:   Smooth-L1 on the median second difference.
+L_cf:      Smooth-L1 between u_0.5 and the clipped true log ratio u*, where m(t) > 0.
 """
 from typing import Dict, Sequence
 
@@ -43,15 +44,17 @@ def dynamics_loss(
 
     dy, dpred = y.diff(dim=1), pred.diff(dim=1)
     dmask = mask[:, 1:] & mask[:, :-1]
-    l_velocity = _masked_mean(robust_pinball(dpred, dy, q, cfg.huber_sigma), dmask)
+    l_diff1 = _masked_mean(robust_pinball(dpred, dy, q, cfg.huber_sigma), dmask)
     d2mask = dmask[:, 1:] & dmask[:, :-1]
-    l_curvature = _masked_mean(F.smooth_l1_loss(dpred[..., k].diff(dim=1), dy.diff(dim=1), reduction="none"), d2mask)
-    l_dynamics = l_velocity + l_curvature
+    l_diff2 = _masked_mean(F.smooth_l1_loss(dpred[..., k].diff(dim=1), dy.diff(dim=1), reduction="none"), d2mask)
 
     base_med = out.base_quantiles[..., k].detach()
     u_star = torch.log((future_y.clamp(min=0) + 0.1 * sigma) / (base_med.clamp(min=0) + 0.1 * sigma))
     u_star = u_star.clamp(-cfg.alpha_max, cfg.alpha_max)
     l_cf = _masked_mean(F.smooth_l1_loss(out.u_median, u_star, reduction="none"), mask & (out.envelope > 0))
 
-    total = l_quantile + cfg.lambda_dyn * l_dynamics + cfg.lambda_cf * l_cf
-    return {"total": total, "quantile": l_quantile, "velocity": l_velocity, "curvature": l_curvature, "cf": l_cf}
+    total = (
+        l_quantile + cfg.lambda_diff1 * l_diff1 + cfg.lambda_diff2 * l_diff2 + cfg.lambda_cf * l_cf
+        + cfg.lambda_reg * out.hyper_reg
+    )
+    return {"total": total, "quantile": l_quantile, "diff1": l_diff1, "diff2": l_diff2, "cf": l_cf, "reg": out.hyper_reg}
