@@ -1,168 +1,139 @@
-LLaVA-TS 交错式多模态上下文联合微调模型
+HyperLoRA 事件条件动态超网络模型
 
-> **核心建模思想**：将“历史事件发生前后的真实时序跳变切片”通过时序编码器映射为连续软词元 `<TS_PATCH>`，与事件语义在 **Qwen3.8-27B** 的上下文中交错排列（实现跨模态少样本内生弹性归纳）；随后利用 $H$ 个可学习查询词元 `<HORIZON_Q_1..H>` 通过**单次 Prefill 前向传播**提取逐时控制潜向量，驱动 **TimesFM 3.0** 顶层适配器与分布级 FiLM 仿射变换算子。
-
-请直接复制以下代码块交由 Claude Code 执行：
+> **核心建模思想**：将 **Qwen3.8-27B** 作为“事件条件超网络（Event-Conditioned HyperNetwork）”。Qwen 读取历史弹性与当前事件组合后，实时生成 **TimesFM 3.0** 末 4 层线性模块的**专属动态奇异值矩阵 $\Sigma(E)$（Hyper-DoRA）**以及**输出头的动态低秩投影权重 $\Delta W_{\text{head}}(E, t)$**，实现“一事一算子、无事件零漂移”。
 
 ```markdown
 # Role & Mission
 你是一位顶尖的多模态时序大模型架构师与 PyTorch 工程专家。当前目录是一个全新的空项目（无任何历史遗留代码）。
-请从 0 到 1 构建一套通用的多模态事件时序预测模型：**Scheme 1 — LLaVA-TS Interleaved Multimodal Time-Series Model（交错式多模态上下文联合微调架构）**，将 **Qwen3.8-27B** 的因果与上下文推理能力与 **TimesFM 3.0** 的长周期时序建模能力深度融合。
+请从 0 到 1 构建一套通用的多模态事件时序预测模型：**Scheme 2 — Event-Conditioned HyperLoRA & Dynamic Quantile Head（事件条件动态超网络架构）**，利用 **Qwen3.8-27B** 作为超网络动态生成 **TimesFM 3.0** 顶层与输出头的调制权重。
 
 ## 核心设计原则与环境约束
-1. **追求纯粹的通用动态建模能力**：
-   - 模型必须支持任意历史长度 $L$、任意预测步长 $H$ 以及任意分位数集合 $Q$。
-   - 训练目标严格基于**条件概率分布生成似然**与**时序导数动力学**，严禁绑定任何特定下游业务评测指标，也不编写任何业务评测模块。
+1. **通用动态算子生成（不绑定任何特定评测指标）**：
+   - 解决静态微调（Static LoRA/DoRA）在无事件窗口漂移、且冻结预测头无法表达大幅度脉冲的根本矛盾。
+   - 模型支持任意预测步长 $H$、任意采样频率与分位数集合 $Q$。不编写任何下游业务评测代码，训练完全由通用的条件分布似然与时序差分动力学损失驱动。
 2. **本地 Mac 开发与生产环境双模底座（Dual-Mode Backbone Factory）**：
-   - 当前在 **本地 Mac（Apple Silicon MPS / CPU）** 上开发，无法在本地加载 54GB 的 Qwen3.8-27B 真实权重。
-   - 请实现 `mode="prod"` 与 `mode="mac_debug"`（默认激活）双模式：
-     - `prod` 模式：使用 `transformers` (`AutoModelForCausalLM`) + `peft` (`LoraConfig`) 加载真实的 `Qwen3.8-27B` 与 `TimesFM 3.0` 权重，支持 BF16 与 Gradient Checkpointing。
-     - `mac_debug` 模式：使用纯 PyTorch 实现结构与接口 100% 同构的轻量级替代主干 `MockQwenCausalLM`（如 2 层 Transformer，`d_llm=128`）与 `MockTimesFM3Backbone`（如 2 层 Patch Transformer，`d_ts=64`），确保在本地 Mac 上可秒级跑通前向传播、反向梯度流与单元测试。
+   - 当前在 **本地 Mac（Apple Silicon MPS / CPU）** 上开发，无法在本地加载 27B 真实权重。
+   - 请实现 `mode="prod"`（对接 HuggingFace `Qwen3.8-27B` + PEFT LoRA 与官方 `TimesFM 3.0`）与 `mode="mac_debug"`（默认激活，使用纯 PyTorch 实现结构同构的轻量级 `MockQwenCausalLM` 与可挂载动态层的 `ModularTimesFM3Backbone`），确保所有动态权重合成、Batch 级向量化矩阵乘法与训练闭环在 Mac 上秒级跑通。
 
 ---
 
 # 1. 项目目录结构规范
-请仅围绕模型研发构建以下目录结构（无需编写任何业务评测模块）：
+请构建以下纯模型研发目录结构：
 ```text
 .
 ├── configs/
-│   └── model_config.py          # 模型超参数配置（支持 mac_debug 与 prod 模式切换，任意预测步长 H）
+│   └── model_config.py          # 模型超参数配置（含 mac_debug / prod 模式切换、HyperLoRA 秩配置）
 ├── data/
-│   ├── schema.py                # 通用多模态时序与事件输入张量契约（Dataclass）
-│   └── synthetic_generator.py   # 用于验证通用动力学能力的合成时序脉冲数据生成器
+│   ├── schema.py                # 通用多模态时序与事件输入张量契约
+│   └── synthetic_generator.py   # 合成多弹性、多阶段脉冲时序数据生成器
 ├── backbones/
-│   ├── qwen_backbone.py         # Qwen3.8-27B 封装（支持 LoRA 与 inputs_embeds 单次 Prefill）
-│   └── timesfm_backbone.py      # TimesFM 3.0 封装（提取编码器隐状态、未来高层表征与基线分位数分布）
+│   ├── qwen_hyper_backbone.py   # Qwen3.8-27B 超网络编码器（含 EventContextCache 上下文缓存复用）
+│   └── timesfm_modular.py       # 支持末 N 层线性模块替换与动态头注入的 TimesFM 3.0 封装
 ├── models/
-│   ├── time_patch_tokenizer.py  # 浅层局部时序跳变提取器与 Time-to-LLM 软词元投影器
-│   ├── interleaved_context.py   # 交错式多模态上下文构造器（含 H 个 <HORIZON_Q> 连续查询槽）
-│   ├── distributional_film.py   # 跨模态注意力与保序分位数 FiLM 仿射调制解码器
-│   └── llava_ts_model.py        # 方案一端到端顶层模型封装
+│   ├── hyper_dora_linear.py     # 核心：样本级/时间步级动态奇异值调制的 HyperDoRALinear 层
+│   ├── dynamic_quantile_head.py # 核心：由超网络实时生成低秩增益权重的动态分位数头
+│   └── hyper_timesfm_model.py   # 方案二端到端顶层模型封装
 ├── losses/
-│   └── dynamics_loss.py         # 通用物理动力学损失（线性尺度分位数似然 + 一阶/二阶时序差分损失）
+│   └── dynamics_loss.py         # 通用物理动力学损失（线性分位数似然 + 一阶/二阶时序差分 + 超网络正则）
 ├── tests/
-│   └── test_model_mechanics.py  # 模型结构、因果性、零事件恒等性、梯度流与动力学拟合单元测试
-└── train_demo.py                # 最小化通用模型训练闭环演示脚本
+│   └── test_hyper_mechanics.py  # 动态算子恒等性、Batch向量化一致性、缓存与梯度流单元测试
+└── train_demo.py                # 最小化通用超网络模型训练闭环演示脚本
 
 ```
 
-
-使用lighting进行开发python >=3.10
-
 ---
 
-# 2. 输入张量契约 (`data/schema.py`)
+# 2. 核心模型架构实现规范 (`models/` & `backbones/`)
 
-定义通用的 `MultimodalTSBatch` 数据结构，支持任意步长 $H$：
+## 2.1 Qwen3.8-27B 事件与内生弹性超网络编码器 (`qwen_hyper_backbone.py`)
 
-* `history_x`: `[B, L_hist]` 历史观测序列，配合 `history_mask: [B, L_hist]`。
-* `future_y`: `Optional[[B, H]]` 未来真实序列（仅训练阶段提供），配合 `future_mask: [B, H]`。
-* **事件模态（同时支持原始文本 Token IDs 或预提取的多路语义向量 + 离散标签）**：
-* 每个事件包含相对当前预测起点 $t_0=0$ 的连续/离散时间坐标：`start_offset`、`end_offset`、`publish_offset`（严格执行因果过滤：仅保留 `publish_offset < 0` 的已发布事件）。
-* 模型内部自动将合法事件划分为：
-1. **历史已发生事件 $E_{\text{hist}}$**（发生在 $[-L_{\text{hist}}, 0)$ 内，最多取最近 $N_{\text{hist}}$ 个）；
-2. **预测窗耦合事件 $E_{\text{fut}}$**（其扩展影响生命周期 `[start_offset - pre_buffer, end_offset + post_buffer]` 与预测窗口 `[0, H)` 相交的事件，最多取 $N_{\text{fut}}$ 个）。
+1. **输入构造（事件上下文 + 历史局部响应统计）**：
 
+* 自动从输入历史序列 `history_x` 中提取过去已发生事件 $E_{\text{hist}}$ 期间相对于滑动周期基线的局部响应特征（蓄水深度、峰值倍率、持续期积分增益、恢复斜率）。
+* 将 `[序列基础统计量 + 历史事件语义与真实响应特征对 + 未来耦合事件语义与时间拓扑]` 编码为嵌入序列输入 `QwenHyperBackbone`（挂载 LoRA）。
 
+2. **输出双层级超网络控制潜码**：
 
+* **序列级事件机制潜码** $C_{\text{event}} \in \mathbb{R}^{B \times d_{\text{llm}}}$：用于生成 TimesFM 3.0 顶层 Transformer Block 的动态低秩奇异值与行范数调制量。
+* **时间步级相位潜码** $P_{\text{step}}(t) \in \mathbb{R}^{B \times H \times d_{\text{llm}}}$：结合未来每一步 $t \in [0, H)$ 相对于未来事件的连续生命周期位置（预热/起爆/持续/尾盘/透支相位），用于生成输出头的逐时动态权重。
 
+3. **上下文哈希缓存 (`EventContextCache`)**：
 
----
-
-# 3. 核心模型架构实现规范 (`models/`)
-
-## 3.1 浅层时序跳变提取与软词元化 (`time_patch_tokenizer.py`)
-
-为了让 Qwen3.8-27B 在上下文中直接“看懂”当前序列对不同事件的真实物理弹性（而非死记硬背文本向量），需要将历史事件对应的真实时序跳变编码为软词元：
-
-1. **提取未被主干平滑的局部高频残差**：
-* 计算历史序列的滑动周期基线 $\text{MA}(X)$ 与稳健标准差 $\sigma_X = \max(\text{Std}(X), 10^{-5})$。
-* 构造双通道浅层跳变序列：标准化加性残差 $R(t) = \frac{X_t - \text{MA}(X_t)}{\sigma_X}$ 与局部对数倍率 $U(t) = \ln\left(\frac{\max(X_t, 0) + 0.1\sigma_X}{\max(\text{MA}(X_t), 0) + 0.1\sigma_X}\right)$。
-
-
-2. **历史事件响应切片与投影**：
-* 对每个历史事件 $e_i \in E_{\text{hist}}$，根据其历史区间切片提取 `[事件前蓄水期, 事件进行期, 事件后恢复期]` 的局部跳变轨迹 $[R(t), U(t)]$ 以及 TimesFM 3.0 浅层 Patch 隐状态。
-* 通过多尺度 1D-Conv + 自适应时间池化 + 两层 MLP（`TimeToLLMProjector`），将每次历史事件的真实时序响应映射为 $P=4$ 个维度为 $d_{\text{llm}}$ 的连续软词元 `<TS_HIST_PATCH>`。
-* 同时将预测起点 $t_0$ 前的近期序列状态映射为 $P=4$ 个 `<TS_RECENT_PATCH>` 软词元。
+* 提供按 `(series_id, event_context_hash)` 索引的特征缓存机制，在推理或冻结特征阶段避免对相同事件上下文重复执行 27B 前向计算。
 
 
 
-## 3.2 交错式多模态上下文构造与单次 Prefill (`interleaved_context.py`)
+## 2.2 动态奇异值调制线性层 `HyperDoRALinear` (`hyper_dora_linear.py`)
 
-1. **交错式上下文拼装（In-Context Elasticity Deduction）**：
-将事件语义词元（由文本 Embedding 或多路向量经 `EventProjector` 映射得到）与时序软词元按严格的时间因果顺序交错排列，构造送入 Qwen3.8-27B 的 `inputs_embeds`：
+编写通用的模块替换函数，将 TimesFM 3.0 最后 $N_{\text{last}}$ 层（如末 4 层）中的 `nn.Linear` 替换为 `HyperDoRALinear`：
 
-$$\Big[\underbrace{E_{\text{series\_stat}}}_{\text{序列统计基线}}, \; \underbrace{\big(\text{EventSem}(e_1^{\text{hist}}), \text{TSPatch}(e_1^{\text{hist}})\big), \dots}_{\text{历史“事件语义-实际跳变”交错少样本对}}, \; \underbrace{\text{TSRecent}}_{\text{近期时序状态}}, \; \underbrace{\text{EventSem}(e_1^{\text{fut}}), \dots}_{\text{未来耦合事件语义与相位}}, \; \underbrace{Q_{\text{hor}, 1}, \dots, Q_{\text{hor}, H}}_{\text{H个未来时间步查询词元}}\Big]$$
+1. **参数结构**：
 
+* 冻结原始权重 $W_0 \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$、偏置 $b_0$ 及原始行范数 $m_0 = \Vert{}W_0\Vert{}_{\text{row}} \in \mathbb{R}^{d_{\text{out}} \times 1}$。
+* 可学习共享低秩基底：$A \in \mathbb{R}^{r \times d_{\text{in}}}$（Kaiming 初始化）与 $B \in \mathbb{R}^{d_{\text{out}} \times r}$（使用 $\mathcal{N}(0, 0.02)$ 小随机数初始化，**禁止初始化为全 0**，以确保第 1 步反向传播时超网络能收到梯度）。
+* 超网络映射头 `HyperParamProjector`：将 $C_{\text{event}}$ 映射为每个样本专属的低秩奇异值对角向量 $s(E) \in \mathbb{R}^{B \times r}$（权重 $\mathcal{N}(0, 10^{-3})$、偏置为 0 初始化）与行幅值相对增益 $\Delta m(E) \in \mathbb{R}^{B \times d_{\text{out}}}$。
 
-* 其中 $Q_{\text{hor}} \in \mathbb{R}^{H \times d_{\text{llm}}}$ 是可学习的查询词元基底，叠加了未来时间步 $t \in [0, H)$ 相对于各未来耦合事件的连续生命周期编码（距离事件起止的相对时间差、所处预热/爆发/衰减/透支相位、日内周期正余弦编码）。
+2. **高效 Batch 向量化前向计算**：
+对于输入隐状态 $h \in \mathbb{R}^{B \times T \times d_{\text{in}}}$ 与事件激活包络 $m_{\text{act}} \in [0, 1]^{B \times T \times 1}$：
 
+* 原生输出：$y_0 = h W_0^\top + b_0$；
+* 动态低秩算子作用：通过张量广播与矩阵乘法计算 $\Delta y = \big((h A^\top) \odot \text{unsqueeze}(s(E), 1)\big) B^\top \in \mathbb{R}^{B \times T \times d_{\text{out}}}$；
+* 动态幅值与门控合成：
 
-2. **单次 Prefill 并行提取控制表征（无自回归生成延迟）**：
-* 将交错序列 `inputs_embeds` 输入挂载了 LoRA 的 `QwenBackbone` 执行**单次前向传播**（无需逐词自回归 Decode）。
-* 直接提取序列末尾 $H$ 个查询槽位置对应的顶层隐藏状态 $Z_{\text{qwen}} \in \mathbb{R}^{B \times H \times d_{\text{llm}}}$。
+$$y = \big(1 + m_{\text{act}} \odot \tanh(\Delta m(E))\big) \odot y_0 + m_{\text{act}} \odot \Delta y$$
 
-
-
-## 3.3 跨模态交互与保序分位数 FiLM 调制头 (`distributional_film.py`)
-
-不在 Transformer 内部做会被 `LayerNorm` 抹平的微弱加法，而是在条件输出分布层进行显式仿射变换：
-
-1. **带完整可学习投影的跨模态注意力**：
-* 从 `TimesFMBackbone` 获取基线分位数分布 $\hat{Y}_{\text{base}} \in \mathbb{R}^{B \times H \times \vert{}Q\vert{}}$ 与顶层未来隐状态 $H_{\text{fut}} \in \mathbb{R}^{B \times H \times d_{\text{ts}}}$。
-* 通过独立的线性投影层 $W_Q, W_K, W_V$，计算 $H_{\text{fut}}$ 对 $Z_{\text{qwen}}$ 的跨模态注意力，输出融合表征 $F_{\text{ctx}}(t) \in \mathbb{R}^{B \times H \times d_{\text{ts}}}$。
+* 当 $m_{\text{act}} = 0$ 时，$y \equiv y_0$，严格保持原生基模在无事件区间的零漂移特性。
 
 
-2. **连续时间事件激活包络 $m(t) \in [0, 1]$**：
-* 对未来每个时间步 $t \in [0, H)$，根据其与 $E_{\text{fut}}$ 的距离计算连续激活权重：事件期内 $m(t)=1.0$，事件前后缓冲区内按指数核 $\exp(-\vert{}\Delta t\vert{}/\tau_{\text{buf}})$ 平滑衰减，无任何耦合事件时 $m(t) \equiv 0.0$。
+
+## 2.3 动态低秩分位数解码头 (`dynamic_quantile_head.py`)
+
+为了彻底解除冻结输出头对大促脉冲幅度的限制，由逐步相位潜码 $P_{\text{step}}(t) \in \mathbb{R}^{B \times H \times d_{\text{llm}}}$ 动态生成输出层算子：
+
+1. **逐时间步动态低秩算子生成**：
+
+* 将 $P_{\text{step}}(t)$ 通过 `HeadHyperMLP` 映射为逐时间步低秩矩阵 $U_{\text{head}}(t) \in \mathbb{R}^{B \times H \times d_{\text{ts}} \times r_h}$ 与 $V_{\text{head}}(t) \in \mathbb{R}^{B \times H \times r_h \times 3}$。
+* 作用于 TimesFM 3.0 顶层输出隐状态 $H_{\text{top}}(t) \in \mathbb{R}^{B \times H \times d_{\text{ts}}}$：
+
+$$[\tilde{u}_{0.5}(t), \; \beta_{0.5}(t), \; \tilde{s}_{\text{spread}}(t)] = \text{bmm}\Big(\text{bmm}\big(H_{\text{top}}(t), U_{\text{head}}(t)\big), V_{\text{head}}(t)\Big)$$
 
 
-3. **保序分位数仿射调制算子（Non-Crossing Quantile FiLM）**：
-* 由 $F_{\text{ctx}}(t)$ 预测三个分布控制参数（输出层采用 $\mathcal{N}(0, 10^{-3})$ 小权重初始化，避免 `gate=0` 导致的第 1 步梯度死锁）：
-* 中位数对数尺度倍率 $u_{0.5}(t) = \alpha_{\max} \cdot \tanh(\text{Linear}_u(F_{\text{ctx}}(t)))$（默认 $\alpha_{\max}=2.5$）；
-* 标准化位置平移项 $\beta_{0.5}(t) = \text{Linear}_\beta(F_{\text{ctx}}(t))$；
-* 分位数不确定性展宽因子 $s_{\text{spread}}(t) = \text{Softplus}(\text{Linear}_s(F_{\text{ctx}}(t))) + 0.1 > 0$。
 
 
-* 令 $\Delta_{q, \text{base}}(t) = \hat{Y}_{q, \text{base}}(t) - \hat{Y}_{0.5, \text{base}}(t)$ 为原生分位数相对于中位数的非负间距，合成最终分布：
+2. **保序分位数物理合成**：
+
+* 令 $u_{0.5}(t) = 2.5 \cdot \tanh(\tilde{u}_{0.5}(t))$，$s_{\text{spread}}(t) = \text{Softplus}(\tilde{s}_{\text{spread}}(t)) + 0.1$，结合连续事件激活包络 $m(t) \in [0, 1]$：
 
 $$\hat{Y}_{0.5}(t) = \hat{Y}_{0.5, \text{base}}(t) \cdot \exp\big(m(t) \cdot u_{0.5}(t)\big) + m(t) \cdot \beta_{0.5}(t) \cdot \sigma_X$$
 
+$$\hat{Y}_{q}(t) = \hat{Y}_{0.5}(t) + \big(\hat{Y}_{q, \text{base}}(t) - \hat{Y}_{0.5, \text{base}}(t)\big) \cdot \exp\big(m(t) \cdot u_{0.5}(t)\big) \cdot \Big(1 + m(t)\big(s_{\text{spread}}(t) - 1\big)\Big)$$
 
-$$\hat{Y}_{q}(t) = \hat{Y}_{0.5}(t) + \Delta_{q, \text{base}}(t) \cdot \exp\big(m(t) \cdot u_{0.5}(t)\big) \cdot \Big(1 + m(t)\big(s_{\text{spread}}(t) - 1\big)\Big)$$
 
-
-* 当 $m(t) = 0$ 时，输出在代数上严格恒等于 $\hat{Y}_{q, \text{base}}(t)$。
 
 
 
 ---
 
-# 4. 通用物理动力学损失函数 (`losses/dynamics_loss.py`)
+# 3. 通用物理动力学损失函数 (`losses/dynamics_loss.py`)
 
-彻底摒弃 `arcsinh` 压缩（防止大脉冲梯度衰减）与任何下游特定窗口积分指标，仅由以下通用生成目标驱动：
+不引入任何下游特定窗口评测指标，仅使用通用时序分布与导数损失：
 
-1. **线性归一化全分位数似然损失 ($\mathcal{L}_{\text{quantile}}$)**：
-在线性标准化空间 $\tilde{Y}_t = (Y_t - \mu_X)/\sigma_X$ 上计算全分位数 Pinball Loss（仅在 $\vert{}e\vert{} > 15\sigma$ 处使用 Huber 软过渡防止极端脏数据梯度爆炸，在正常脉冲区间保持 100% 线性梯度）。
-2. **一阶速度差分与二阶拐点差分损失 ($\mathcal{L}_{\text{dynamics}}$)**：
-* 一阶差分（斜率/阶跃速度）：$\nabla_t \tilde{Y}_t = \tilde{Y}_t - \tilde{Y}_{t-1}$，计算全分位数 Pinball Loss，迫使模型精准捕捉事件起爆时的正向阶跃斜率与结束时的回落斜率。
-* 二阶差分（曲率/拐点加速度）：$\nabla^2_t \tilde{Y}_t = \nabla_t \tilde{Y}_t - \nabla_t \tilde{Y}_{t-1}$，使用 Smooth-L1 监督中位数二阶差分，锁定脉冲波峰与波谷的转折点。
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{linear-pinball}}(\tilde{Y}, \hat{\tilde{Y}}) + \lambda_1 \mathcal{L}_{\text{diff-1st}}(\nabla_t \tilde{Y}, \nabla_t \hat{\tilde{Y}}) + \lambda_2 \mathcal{L}_{\text{diff-2nd}}(\nabla^2_t \tilde{Y}, \nabla^2_t \hat{\tilde{Y}}) + \lambda_3 \mathcal{L}_{\text{cf}}(u_{0.5}, u^*) + \lambda_{\text{reg}} \big(\Vert{}s(E)\Vert{}_2^2 + \Vert{}\Delta m(E)\Vert{}_2^2\big)$$
 
-
-3. **反事实对数倍率直通监督 ($\mathcal{L}_{\text{cf}}$)**：
-在 $m(t) > 0$ 的时刻，计算真实对数倍率 $u^*(t) = \text{clip}\left(\ln\frac{\max(Y_t, 0) + 0.1\sigma_X}{\max(\hat{Y}_{0.5,\text{base}}(t), 0) + 0.1\sigma_X}, -2.5, 2.5\right)$ 与 $u_{0.5}(t)$ 的 Smooth-L1 Loss。
-4. 总损失：$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{quantile}} + \lambda_1 \mathcal{L}_{\text{dynamics}} + \lambda_2 \mathcal{L}_{\text{cf}}$。
+* 移除 `arcsinh` 变换，在线性标准化空间 $\tilde{Y} = (Y - \mu_X)/\sigma_X$ 计算全分位数 Pinball Loss；
+* 通过一阶差分 $\nabla_t Y$ 与二阶差分 $\nabla^2_t Y$ 监督脉冲的阶跃斜率与波峰拐点；
+* 对超网络生成的动态奇异值施加轻量 L2 正则以保证算子平稳性。
 
 ---
 
-# 5. 模型机制单元测试与演示 (`tests/test_model_mechanics.py` & `train_demo.py`)
+# 4. 模型机制单元测试与演示 (`tests/test_hyper_mechanics.py` & `train_demo.py`)
 
-请编写并运行 `pytest`，确保以下 5 项纯模型能力测试全部通过：
+请编写并运行 `pytest`，确保以下 5 项纯模型单元测试全部通过：
 
-1. `test_arbitrary_horizon_and_shapes`：测试不同预测步长（如 $H=12, 24, 72, 96$）下的前向传播，验证输出维度 `[B, H, |Q|]` 完全匹配。
-2. `test_zero_event_exact_identity`：当无未来耦合事件（$m(t)=0$）时，断言模型输出与原生 `TimesFMBackbone` 输出的最大绝对误差严格为 `0.0`。
-3. `test_causal_time_filtering`：注入 `publish_offset >= 0` 的未发布事件，断言模型将其完全屏蔽，修改其数值不影响输出。
-4. `test_end_to_end_gradient_flow`：执行一次反向传播，断言 `QwenBackbone` 的 LoRA 参数、`TimePatchTokenizer`、`Q_hor` 查询词元及 `DistributionalFiLM` 的梯度均非零且无 NaN。
-5. `test_in_context_elasticity_and_impulse_fit`：在 `train_demo.py` 中构造两组具有相同未来事件文本、但历史事件跳变幅度截然不同（高弹性 $3.5\times$ vs 低弹性 $1.0\times$，并含事件前蓄水下拉与期内双峰）的合成序列，在本地 Mac 上训练 50 步，验证模型能够通过交错上下文自动区分两种弹性，并精准拟合出预热下拉、起爆阶跃与分位数展宽！
+1. `test_zero_event_strict_weight_identity`：当 $m(t)=0$ 时，验证替换了 `HyperDoRALinear` 和 `DynamicQuantileHead` 的模型输出与未修改的原生 `TimesFM 3.0` 输出误差严格为 `0.0`。
+2. `test_batched_hyper_dora_equivalence`：验证 `HyperDoRALinear` 的 Batch 向量化前向计算结果，与逐个样本显式构造权重矩阵 $W_{\text{eff}}^{(b)} = W_0 + B \cdot \text{Diag}(s_b) \cdot A$ 再与样本相乘的结果在数值上完全一致（误差 $< 10^{-6}$）。
+3. `test_hypernetwork_gradient_flow`：执行一次 backward，断言 `QwenHyperBackbone` 的 LoRA 参数、`HyperDoRALinear` 的共享基底 $A, B$ 与超网络投影头、以及 `DynamicQuantileHead` 的梯度均大于 0 且无 NaN。
+4. `test_context_cache_and_quantile_monotonicity`：验证 `EventContextCache` 命中前后的输出完全一致，且在任意正负脉冲下所有分位数通道严格递增不交叉。
+5. `test_dynamic_operator_impulse_learning`：在 `train_demo.py` 中构造包含不同实体弹性与复杂脉冲形态（预热下拉、起爆尖峰、指数衰减、期后透支）的合成序列，在本地 Mac 上运行 50 步训练演示，验证损失快速收敛，且动态生成的算子能对同一事件在不同弹性序列上产生截然不同的精确脉冲轨迹！
 
 ```

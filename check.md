@@ -2,6 +2,65 @@
 
 Status: **open** = needs your decision or confirmation. **confirmed** = you accepted it.
 
+## Scheme 2 — HyperLoRA (branch `hyperlora`)
+
+### H1 — confirmed (replace, reuse parts) — What happens to the Scheme 1 code on this branch?
+`task.md` says "new empty project", but the branch has the Scheme 1 code. Many parts can be used again: config, schema, generator, mock Qwen + LoRA, event selection, lifecycle, loss. Options: (a) replace Scheme 1 and move the reused parts into the new file names; (b) keep both schemes, with shared modules.
+
+### H2 — confirmed (all 10 per layer) — Which linear modules in the last 4 TimesFM layers become `HyperDoRALinear`?
+Each real TimesFM 3.0 layer has 10 `nn.Linear` modules: `seq_attn.{query,key,value,out}_proj`, `var_attn.{query,key,value,out}_proj`, `ff0`, `ff1`. Options: all 10 per layer (40 modules), or only `seq_attn` + `ff` (24 modules).
+
+### H3 — open — Per-sample weights inside the flattened TimesFM layouts
+TimesFM calls its linears with flattened inputs: `seq_attn` (b·v, n, d), `var_attn` (b·n, v, d), `ff` (b, v, n, d). With one variate (v = 1, no covariates in the schema), all three can be reshaped to (B, n, d) in the same token order. **Decision:** `HyperDoRALinear` reshapes its input to (B, −1, d_in), and the model supports v = 1 only.
+
+### H4 — open — m_act for each TimesFM patch token
+`task.md` gives m_act ∈ [B, T, 1] but does not map m(t) on steps to patch tokens. **Decision:** token n_ctx − 1 + k forecasts the steps from k·p on, so m_act(token) = max m(t) over the steps that the token forecasts. m_act = 0 for all context tokens before n_ctx − 1, so the history processing does not change.
+
+### H5 — open — Gradients through the prod TimesFM
+`TimesFM3Torch.decode` has `@torch.no_grad()`. Gradients must flow through the dynamic layers. **Decision:** call the undecorated function (`TimesFM3Torch.decode.__wrapped__`). The frozen TimesFM weights still get no gradient.
+
+### H6 — open — Mock TimesFM structure
+**Decision:** a new `ModularTimesFM3Backbone` mock with the TimesFM 3 module names (`transformer_stack.layers[i].seq_attn.query_proj`, …, `ff0`, `ff1`) and horizon patch tokens, so that the same replacement code works in both modes.
+
+### H7 — open — Source of C_event and P_step(t)
+**Decision:** the Qwen context ends with one `<EVENT_SUMMARY>` token and H step query tokens. C_event = the top hidden state of the summary token. P_step(t) = the top hidden state of step query t.
+
+### H8 — open — History response features
+`task.md` names 4 features per history event. **Decision:** computed on U(t) relative to the moving baseline:
+- dip depth = min U in the pre-buffer,
+- peak ratio = max exp(U) in the event,
+- integrated gain = Σ U over the event,
+- recovery slope = mean ΔU over the post-buffer.
+
+### H9 — open — Five phases
+`task.md` now names 5 phases (warm-up, burst, sustain, tail, overdraft). **Decision:**
+- warm-up = pre-buffer,
+- burst = the first third of the event,
+- sustain = the middle third,
+- tail = the last third,
+- overdraft = post-buffer.
+
+### H10 — open — `EventContextCache` key and validity
+**Decision:** key = (series_id, SHA-1 of the Qwen input tensors and H). The value is the detached (C_event, P_step). The cache is used only when it is turned on (inference or frozen-feature training). With trainable LoRA, cached values become stale. The schema gets an optional `series_id`.
+
+### H11 — open — Spread start value of the dynamic head
+s̃ = H_top · U · V has no bias, so s_spread starts at Softplus(≈0) + 0.1 = 0.79, and the event quantile range becomes narrower before training. Options: keep it as specified, or add a bias so that s_spread = 1.0 at the start (as in Scheme 1, S7).
+
+### H12 — open — Test 5 with 50 steps
+In Scheme 1, 50 steps were not enough for a reliable elasticity separation (C1). I will measure this again for Scheme 2 and record the result here.
+
+### H13 — open — The row norm m0 is not stored
+`task.md` lists the frozen row norm m0 = ‖W0‖_row. The formula y = (1 + m_act · tanh(Δm)) · y0 + m_act · Δy uses only a relative gain, so m0 is never needed. **Decision:** m0 is not stored. Tell me if you want the DoRA form m0 · (1 + tanh Δm) · W / ‖W‖ instead. That form changes the output even when Δm = 0, if B · Diag(s) · A ≠ 0.
+
+### H14 — open — Mock TimesFM training
+As in Scheme 1 (S1): the mock TimesFM is trainable, except W0 and b0 inside the 40 `HyperDoRALinear` modules (frozen, as specified). In prod, all TimesFM weights are frozen.
+
+### H15 — info — Stage A keeps Scheme 1 runnable
+`masked_mean_std`, `sinusoidal` and `interp_quantiles` exist in `backbones/timesfm_backbone.py` (Scheme 1) and `backbones/timesfm_modular.py` for one commit. Stage B deletes the Scheme 1 files.
+
+### H16 — info — Test 2 runs in float64
+The batched-equivalence test runs in float64, so it checks the algebra (error < 1e-6) without float32 summation-order noise. It checks the `task.md` form (m_act = 1, Δm = 0) and the full form (per-token m_act and Δm).
+
 ## Stage 3 (losses, demo, tests)
 
 ### C1 — open — Test 5 trains 100 steps, not 50

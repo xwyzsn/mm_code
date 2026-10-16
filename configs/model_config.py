@@ -23,9 +23,14 @@ class ModelConfig:
     # TimesFM backbone. In prod, d_ts and patch length come from the checkpoint.
     timesfm_model_id: str = "google/timesfm-3.0-pytorch"
     d_ts: int = 64
-    ts_layers: int = 2
+    ts_layers: int = 4
     ts_heads: int = 4
     ts_patch_len: int = 8
+
+    # HyperDoRA on the last N TimesFM layers, dynamic quantile head
+    n_last_layers: int = 4
+    hyper_rank: int = 8  # r
+    head_rank: int = 4  # r_h
 
     bf16: bool = False
     gradient_checkpointing: bool = False

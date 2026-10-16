@@ -56,3 +56,26 @@
 **Solution:**
 - Added `model.md`: the original design (idea, requirements, Mermaid data flow, component table), the current implementation (Mermaid data flow with the changed parts in orange, one section per component), and the differences in three tables: Changes D1–D7, Interpretations I1–I22, Additions A1–A6. Each row has the reason and a link to the `check.md` ID. Section 4 lists the verification limits.
 - `check.md`: added two new open items found while writing: C6 (σ_X "robust std" vs. plain std) and C7 (Q_hor base q0 + step MLP instead of an H × d_llm matrix).
+
+## 2026-10-17 — Scheme 2 (HyperLoRA), Stage A of 3: HyperDoRALinear and modular TimesFM 3.0
+
+**Problem:** `task.md` now describes Scheme 2. Qwen works as a hypernetwork that modulates the last 4 TimesFM 3.0 layers per sample (Hyper-DoRA). This needs a dynamic linear layer, a way to put it into the real and the mock TimesFM, and gradients through the prod TimesFM (`decode` has `@torch.no_grad`).
+
+**Solution:**
+- `models/hyper_dora_linear.py`:
+  - `HyperDoRALinear`: frozen W0 and b0; A with Kaiming init; B ~ N(0, 0.02); `HyperParamProjector` with N(0, 1e-3) weights and zero bias.
+  - Batched forward y = (1 + m_act · tanh Δm) · y0 + m_act · ((h Aᵀ) ⊙ s) Bᵀ.
+  - `HyperCondition` maps m(t) to patch tokens (`check.md` H4).
+  - `inject_hyper_dora()` replaces every `nn.Linear` in the last N layers.
+  - `hyper_condition()` is a context manager.
+- `backbones/timesfm_modular.py`:
+  - `MockTimesFM3Core` uses the TimesFM 3 module names (10 linears per layer) and horizon patch tokens.
+  - `ProdTimesFM3Core` calls `TimesFM3Torch.decode.__wrapped__` (gradients flow).
+  - `ModularTimesFM3Backbone` gives `TimesFMOutput(top_hidden, base_quantiles)`.
+- `configs/model_config.py`: `n_last_layers = 4`, `hyper_rank = 8`, `head_rank = 4`, `ts_layers = 4`.
+- `tests/test_hyper_mechanics.py`:
+  - batched equivalence (task.md form and full form, error < 1e-6),
+  - mock backbone zero-event identity and causal locality,
+  - prod TimesFM 3.0 zero-event identity and gradients (skipped if the checkpoint is not local).
+- `check.md`: Scheme 2 items H1–H16 (H1, H2 confirmed).
+- Result: `pytest` 11 passed (3 new + 8 Scheme 1). On the real checkpoint: 40 modules replaced, exact identity at m = 0, non-zero gradients for A, B and the projector of all 40 modules, no gradient for W0.
