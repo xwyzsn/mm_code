@@ -42,6 +42,18 @@ You chose "relative checks". These are the exact assertions on a held-out batch 
 - The target u* uses `base_median.detach()`, because u* is a target.
 - Learning rate 4e-3 (2e-2 and above diverge). The optimizer is AdamW for all trainable parameters.
 
+## Found while writing model.md
+
+### C6 — open — σ_X: "robust std" or plain std?
+- **Spec:** `task.md` says "稳健标准差 σ_X = max(Std(X), 1e-5)". The name says robust, but the formula is the plain std.
+- **Decision:** the code follows the formula (masked population std). When there are large events in the history, σ_X becomes larger, and R(t) of the events becomes smaller.
+- **Question:** do you want a robust estimator (for example, 1.4826 · MAD) instead?
+
+### C7 — open — Q_hor base is q0 + step MLP, not an H × d_llm matrix
+- **Spec:** Q_hor ∈ R^{H×d_llm} is a learnable query token base.
+- **Decision:** one learnable vector q0 ∈ R^{d_llm} + an MLP of the step encoding. A fixed H × d matrix cannot support "any H" (for example, an H that training did not use).
+- **Question:** is this acceptable? The alternative is a matrix for a maximum H_max, sliced to H.
+
 ## Stage 1–2 (already reported)
 
 ### S1 — confirmed — Mock TimesFM is trainable in mac_debug; prod TimesFM is frozen with a trainable horizon adapter.

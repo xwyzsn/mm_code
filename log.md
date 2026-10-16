@@ -48,3 +48,11 @@
 - `models/distributional_film.py`: soft locality bias −2.0 · |t − t'| in the cross-attention (see `check.md` C2).
 - `check.md`: all open questions and decisions (Stages 1–3).
 - Result: `pytest` 8 passed in 18 s. Demo on MPS, 50 steps: loss 1.00 → 0.65, warm-up shift −0.31σ, width ratio 2.9, u_hi/u_lo 0.54/0.51. CPU, 100 steps: loss 1.00 → 0.34, u_hi/u_lo 0.73/0.34, warm-up shift −0.32σ, event MAE 0.21 × base.
+
+## 2026-10-17 — Model documentation: original design vs. current implementation
+
+**Problem:** There was no single document that describes the original design in `task.md`, the current implementation, and the differences between them with reasons.
+
+**Solution:**
+- Added `model.md`: the original design (idea, requirements, Mermaid data flow, component table), the current implementation (Mermaid data flow with the changed parts in orange, one section per component), and the differences in three tables: Changes D1–D7, Interpretations I1–I22, Additions A1–A6. Each row has the reason and a link to the `check.md` ID. Section 4 lists the verification limits.
+- `check.md`: added two new open items found while writing: C6 (σ_X "robust std" vs. plain std) and C7 (Q_hor base q0 + step MLP instead of an H × d_llm matrix).
