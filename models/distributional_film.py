@@ -14,6 +14,8 @@ from torch import Tensor, nn
 
 from configs.model_config import ModelConfig
 
+LOCALITY_SLOPE = 2.0  # attention logit bias -slope * |t - t'|: step t attends mostly to its own Z_qwen(t)
+
 
 def event_lifecycle(start: Tensor, end: Tensor, valid: Tensor, horizon: int, cfg: ModelConfig) -> Tuple[Tensor, Tensor]:
     """start, end, valid: [B, N]. Returns per-event envelope [B, N, H] in [0, 1] and phase one-hot [B, N, H, 4].
@@ -58,7 +60,9 @@ class DistributionalFiLM(nn.Module):
 
     def forward(self, h_fut: Tensor, z_qwen: Tensor, base: Tensor, m: Tensor, sigma: Tensor, median_idx: int) -> FiLMOutput:
         """h_fut: [B, H, d_ts], z_qwen: [B, H, d_llm], base: [B, H, Q], m: [B, H], sigma: [B, 1]."""
-        f_ctx = self.norm(h_fut + self.attn(h_fut, z_qwen, z_qwen, need_weights=False)[0])
+        t = torch.arange(h_fut.shape[1], device=h_fut.device, dtype=h_fut.dtype)
+        locality = -LOCALITY_SLOPE * (t[:, None] - t[None, :]).abs()
+        f_ctx = self.norm(h_fut + self.attn(h_fut, z_qwen, z_qwen, attn_mask=locality, need_weights=False)[0])
         u = self.alpha_max * torch.tanh(self.lin_u(f_ctx)).squeeze(-1)
         beta = self.lin_beta(f_ctx).squeeze(-1)
         spread = F.softplus(self.lin_s(f_ctx)).squeeze(-1) + 0.1
